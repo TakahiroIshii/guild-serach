@@ -1,5 +1,5 @@
 import * as cdk from "aws-cdk-lib";
-import { RemovalPolicy } from "aws-cdk-lib";
+import { Arn, ArnFormat, RemovalPolicy } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
   NodejsFunction,
@@ -12,22 +12,29 @@ import {
   StreamViewType,
   Table,
 } from "aws-cdk-lib/aws-dynamodb";
-import { keyMap, Keys, tableMap } from "../models/tableDecorator";
-import { Guild } from "../models/guild";
 import * as openSearch from "aws-cdk-lib/aws-opensearchserverless";
 import { KinesisFirehoseStream } from "aws-cdk-lib/aws-events-targets";
-import { Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
+import {
+  Effect,
+  PolicyDocument,
+  PolicyStatement,
+  Role,
+  ServicePrincipal,
+} from "aws-cdk-lib/aws-iam";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import { CfnDeliveryStream } from "aws-cdk-lib/aws-kinesisfirehose";
+import { guildTableName, guildTablepk } from "../models/guild";
+import * as pipes from "aws-cdk-lib/aws-pipes";
+import { SqsDlq } from "aws-cdk-lib/aws-lambda-event-sources";
+import { Queue } from "aws-cdk-lib/aws-sqs";
+import { LambdaRestApi } from "aws-cdk-lib/aws-apigateway";
 
-const tableName = tableMap.get(Guild)!;
-const pk = keyMap.get(Guild)!.get(Keys.PK)!;
 export class GuildSearchStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
     const functionProp: NodejsFunctionProps = {
-      runtime: Runtime.NODEJS_14_X,
+      runtime: Runtime.NODEJS_16_X,
       memorySize: 1024,
     };
 
@@ -36,10 +43,15 @@ export class GuildSearchStack extends cdk.Stack {
       ...functionProp,
     });
 
+    const enrichmentHandler = new NodejsFunction(this, "EnrichmentHandler", {
+      entry: "lambda/enrichmentHandler.ts",
+      ...functionProp,
+    });
+
     const guildTable = new Table(this, "Friend", {
-      tableName: tableName,
+      tableName: guildTableName,
       partitionKey: {
-        name: pk,
+        name: guildTablepk,
         type: AttributeType.STRING,
       },
       billingMode: BillingMode.PAY_PER_REQUEST,
@@ -109,9 +121,19 @@ export class GuildSearchStack extends cdk.Stack {
     const guildStreamBucket = new Bucket(this, "GuildStreamBucket", {});
     guildStreamBucket.grantWrite(firehoseRole);
 
-    const guildStream = new KinesisFirehoseStream(
+    const guildStreamName = "guildStream";
+    const guildStreamArn = Arn.format(
+      {
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+        service: "firehose",
+        resource: "deliverystream",
+        resourceName: guildStreamName,
+      },
+      this
+    );
+    new KinesisFirehoseStream(
       new CfnDeliveryStream(this, "GuildStream", {
-        deliveryStreamName: "guildStream",
+        deliveryStreamName: guildStreamName,
         deliveryStreamType: "DirectPut",
         amazonOpenSearchServerlessDestinationConfiguration: {
           indexName: indexName,
@@ -133,5 +155,102 @@ export class GuildSearchStack extends cdk.Stack {
         },
       })
     );
+
+    const queue = new Queue(this, "GuildDlq");
+    new SqsDlq(queue);
+    const dlqArn = Arn.format(
+      {
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+        service: "sqs",
+        resource: queue.queueName,
+      },
+      this
+    );
+
+    const pipesRole = new Role(this, "GuildPipesRole", {
+      assumedBy: new ServicePrincipal("pipes.amazonaws.com"),
+      inlinePolicies: {
+        dynamoDBStreamSourcePipePolicy: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              actions: [
+                "dynamodb:DescribeStream",
+                "dynamodb:GetRecords",
+                "dynamodb:GetShardIterator",
+                "dynamodb:ListStreams",
+              ],
+              resources: [guildTable.tableStreamArn!],
+              effect: Effect.ALLOW,
+            }),
+          ],
+        }),
+        firehoseTargetPipePolicy: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              actions: ["firehose:PutRecordBatch"],
+              resources: [guildStreamArn],
+              effect: Effect.ALLOW,
+            }),
+          ],
+        }),
+        dlqPolicy: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              actions: [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              resources: [dlqArn],
+              effect: Effect.ALLOW,
+            }),
+          ],
+        }),
+        enrichmentPolicy: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              actions: ["lambda:InvokeFunction"],
+              resources: [enrichmentHandler.functionArn],
+              effect: Effect.ALLOW,
+            }),
+          ],
+        }),
+      },
+    });
+
+    new pipes.CfnPipe(this, "GuildPipes", {
+      roleArn: pipesRole.roleArn,
+      source: guildTable.tableStreamArn!,
+      target: guildStreamArn,
+
+      name: "GuildPipe",
+      sourceParameters: {
+        dynamoDbStreamParameters: {
+          startingPosition: "LATEST",
+          batchSize: 5,
+          maximumBatchingWindowInSeconds: 2,
+          deadLetterConfig: {
+            arn: dlqArn,
+          },
+          maximumRetryAttempts: 1,
+        },
+        filterCriteria: {
+          filters: [
+            {
+              pattern: JSON.stringify({ eventName: ["INSERT"] }),
+            },
+          ],
+        },
+      },
+      enrichment: enrichmentHandler.functionArn,
+    });
+
+    const testAPI = new LambdaRestApi(this, "TestAPI", {
+      handler: guildManageHandler,
+      proxy: false,
+    });
+
+    const tests = testAPI.root.addResource("test");
+    tests.addMethod("GET");
   }
 }
