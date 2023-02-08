@@ -1,13 +1,40 @@
 import * as AWS from "aws-sdk";
-import { APIGatewayProxyHandler, APIGatewayProxyResult } from "aws-lambda";
+import {
+  APIGatewayProxyEvent,
+  APIGatewayProxyHandler,
+  APIGatewayProxyResult,
+} from "aws-lambda";
 import { DocumentClient } from "aws-sdk/clients/dynamodb";
 import { guildTableName, guildTablepk } from "../models/guild";
+const { Client } = require("@opensearch-project/opensearch");
+const { AwsSigv4Signer } = require("@opensearch-project/opensearch/aws");
 
 const db = new AWS.DynamoDB.DocumentClient();
+const osClient = new Client({
+  ...AwsSigv4Signer({
+    region: process.env.AWS_REGION,
+    service: "aoss",
+    getCredentials: () =>
+      new Promise((resolve, reject) => {
+        // Any other method to acquire a new Credentials object can be used.
+        AWS.config.getCredentials((err, credentials) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(credentials);
+          }
+        });
+      }),
+  }),
+  node: process.env.OPEN_SEARCH_URL,
+});
 
-export const handler: APIGatewayProxyHandler =
-  async (): Promise<APIGatewayProxyResult> => {
-    const timeStamp = Date.now();
+export const handler: APIGatewayProxyHandler = async ({
+  httpMethod,
+  pathParameters,
+}: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+  const timeStamp = Date.now();
+  if (httpMethod == "POST") {
     const putParam: DocumentClient.PutItemInput = {
       TableName: guildTableName,
       Item: {
@@ -34,4 +61,24 @@ export const handler: APIGatewayProxyHandler =
       statusCode: 200,
       body: "Done",
     };
+  }
+  const description = pathParameters!["description"];
+  const query = {
+    query: {
+      match: {
+        description: {
+          query: description,
+        },
+      },
+    },
   };
+
+  const response = await osClient.search({
+    index: process.env.OPEN_SEARCH_INDEX,
+    body: query,
+  });
+  return {
+    statusCode: 200,
+    body: JSON.stringify(response.body.hits),
+  };
+};

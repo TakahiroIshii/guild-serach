@@ -33,6 +33,12 @@ export class GuildSearchStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    const indexName = "guild-index";
+    const collection = new openSearch.CfnCollection(this, "GuildSearch", {
+      name: "guild-search",
+      type: "SEARCH",
+    });
+
     const functionProp: NodejsFunctionProps = {
       runtime: Runtime.NODEJS_16_X,
       memorySize: 1024,
@@ -40,11 +46,10 @@ export class GuildSearchStack extends cdk.Stack {
 
     const guildManageHandler = new NodejsFunction(this, "GuildManageHandler", {
       entry: "lambda/guildManageHandler.ts",
-      ...functionProp,
-    });
-
-    const enrichmentHandler = new NodejsFunction(this, "EnrichmentHandler", {
-      entry: "lambda/enrichmentHandler.ts",
+      environment: {
+        OPEN_SEARCH_URL: collection.attrCollectionEndpoint,
+        OPEN_SEARCH_INDEX: indexName,
+      },
       ...functionProp,
     });
 
@@ -61,10 +66,9 @@ export class GuildSearchStack extends cdk.Stack {
 
     guildTable.grantReadWriteData(guildManageHandler);
 
-    const indexName = "guild-index";
-    const collection = new openSearch.CfnCollection(this, "GuildSearch", {
-      name: "guild-search",
-      type: "SEARCH",
+    const enrichmentHandler = new NodejsFunction(this, "EnrichmentHandler", {
+      entry: "lambda/enrichmentHandler.ts",
+      ...functionProp,
     });
 
     const encryptionPolicy = new openSearch.CfnSecurityPolicy(
@@ -113,6 +117,23 @@ export class GuildSearchStack extends cdk.Stack {
       }
     );
     collection.addDependency(accessPolicy);
+
+    const searchPolicy = new openSearch.CfnAccessPolicy(
+      this,
+      "GuildSearchPolicy",
+      {
+        name: "guild-search-policy",
+        policy:
+          `[{"Rules": [{"ResourceType": "index",` +
+          `"Resource": ["index/${collection.name}/${indexName}"],` +
+          `"Permission": ["aoss:ReadDocument"]}],` +
+          `"Principal": ["arn:aws:sts::${this.account}:assumed-role/${
+            guildManageHandler.role!.roleName
+          }/*"]}]`,
+        type: "data",
+      }
+    );
+    collection.addDependency(searchPolicy);
 
     new cdk.CfnOutput(this, "OpenSearchDashboardEndpoint", {
       value: collection.attrDashboardEndpoint,
@@ -245,12 +266,13 @@ export class GuildSearchStack extends cdk.Stack {
       enrichment: enrichmentHandler.functionArn,
     });
 
-    const testAPI = new LambdaRestApi(this, "TestAPI", {
+    const guildManageAPI = new LambdaRestApi(this, "GuildManageAPI", {
       handler: guildManageHandler,
       proxy: false,
     });
 
-    const tests = testAPI.root.addResource("test");
-    tests.addMethod("GET");
+    const manage = guildManageAPI.root.addResource("manage");
+    manage.addMethod("POST");
+    manage.addResource("{description}").addMethod("GET");
   }
 }

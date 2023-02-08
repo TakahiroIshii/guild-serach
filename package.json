@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "@aws-sdk/util-dynamodb": "^3.264.0",
+    "@opensearch-project/opensearch": "^2.2.0",
     "@types/aws-lambda": "^8.10.109",
     "@types/jest": "^29.2.4",
     "@types/node": "18.11.15",
