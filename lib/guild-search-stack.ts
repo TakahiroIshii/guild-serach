@@ -1,19 +1,16 @@
 import * as cdk from "aws-cdk-lib";
+import * as openSearch from "aws-cdk-lib/aws-opensearchserverless";
+import * as pipes from "aws-cdk-lib/aws-pipes";
 import { Arn, ArnFormat, RemovalPolicy } from "aws-cdk-lib";
-import { Construct } from "constructs";
-import {
-  NodejsFunction,
-  NodejsFunctionProps,
-} from "aws-cdk-lib/aws-lambda-nodejs";
-import { Runtime } from "aws-cdk-lib/aws-lambda";
 import {
   AttributeType,
   BillingMode,
   StreamViewType,
   Table,
 } from "aws-cdk-lib/aws-dynamodb";
-import * as openSearch from "aws-cdk-lib/aws-opensearchserverless";
-import { KinesisFirehoseStream } from "aws-cdk-lib/aws-events-targets";
+import { Bucket } from "aws-cdk-lib/aws-s3";
+import { CfnDeliveryStream } from "aws-cdk-lib/aws-kinesisfirehose";
+import { Construct } from "constructs";
 import {
   Effect,
   PolicyDocument,
@@ -21,13 +18,17 @@ import {
   Role,
   ServicePrincipal,
 } from "aws-cdk-lib/aws-iam";
-import { Bucket } from "aws-cdk-lib/aws-s3";
-import { CfnDeliveryStream } from "aws-cdk-lib/aws-kinesisfirehose";
-import { guildTableName, guildTablepk } from "../models/guild";
-import * as pipes from "aws-cdk-lib/aws-pipes";
-import { SqsDlq } from "aws-cdk-lib/aws-lambda-event-sources";
-import { Queue } from "aws-cdk-lib/aws-sqs";
+import { guildTableName, guildTablePk } from "../models/guild";
+import { KinesisFirehoseStream } from "aws-cdk-lib/aws-events-targets";
 import { LambdaRestApi } from "aws-cdk-lib/aws-apigateway";
+import {
+  NodejsFunction,
+  NodejsFunctionProps,
+} from "aws-cdk-lib/aws-lambda-nodejs";
+import { playerTableName, playerTablePk } from "../models/player";
+import { Queue } from "aws-cdk-lib/aws-sqs";
+import { Runtime } from "aws-cdk-lib/aws-lambda";
+import { SqsDlq } from "aws-cdk-lib/aws-lambda-event-sources";
 
 export class GuildSearchStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -53,10 +54,15 @@ export class GuildSearchStack extends cdk.Stack {
       ...functionProp,
     });
 
-    const guildTable = new Table(this, "Friend", {
+    const enrichmentHandler = new NodejsFunction(this, "EnrichmentHandler", {
+      entry: "lambda/enrichmentHandler.ts",
+      ...functionProp,
+    });
+
+    const guildTable = new Table(this, "Guild", {
       tableName: guildTableName,
       partitionKey: {
-        name: guildTablepk,
+        name: guildTablePk,
         type: AttributeType.STRING,
       },
       billingMode: BillingMode.PAY_PER_REQUEST,
@@ -66,10 +72,17 @@ export class GuildSearchStack extends cdk.Stack {
 
     guildTable.grantReadWriteData(guildManageHandler);
 
-    const enrichmentHandler = new NodejsFunction(this, "EnrichmentHandler", {
-      entry: "lambda/enrichmentHandler.ts",
-      ...functionProp,
+    const playerTable = new Table(this, "Player", {
+      tableName: playerTableName,
+      partitionKey: {
+        name: playerTablePk,
+        type: AttributeType.STRING,
+      },
+      billingMode: BillingMode.PAY_PER_REQUEST,
     });
+
+    playerTable.grantReadWriteData(guildManageHandler);
+    playerTable.grantReadWriteData(enrichmentHandler);
 
     const encryptionPolicy = new openSearch.CfnSecurityPolicy(
       this,
@@ -273,6 +286,7 @@ export class GuildSearchStack extends cdk.Stack {
 
     const manage = guildManageAPI.root.addResource("manage");
     manage.addMethod("POST");
-    manage.addResource("{description}").addMethod("GET");
+    manage.addResource("description").addResource("{value}").addMethod("GET");
+    manage.addResource("player").addResource("{value}").addMethod("GET");
   }
 }

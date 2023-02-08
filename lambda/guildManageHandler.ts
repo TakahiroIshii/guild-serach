@@ -5,18 +5,20 @@ import {
   APIGatewayProxyResult,
 } from "aws-lambda";
 import { DocumentClient } from "aws-sdk/clients/dynamodb";
-import { guildTableName, guildTablepk } from "../models/guild";
+import { guildTableName, guildTablePk } from "../models/guild";
+import { playerTableName, playerTablePk } from "../models/player";
+
 const { Client } = require("@opensearch-project/opensearch");
 const { AwsSigv4Signer } = require("@opensearch-project/opensearch/aws");
 
 const db = new AWS.DynamoDB.DocumentClient();
+
 const osClient = new Client({
   ...AwsSigv4Signer({
     region: process.env.AWS_REGION,
     service: "aoss",
     getCredentials: () =>
       new Promise((resolve, reject) => {
-        // Any other method to acquire a new Credentials object can be used.
         AWS.config.getCredentials((err, credentials) => {
           if (err) {
             reject(err);
@@ -31,47 +33,36 @@ const osClient = new Client({
 
 export const handler: APIGatewayProxyHandler = async ({
   httpMethod,
+  path,
   pathParameters,
 }: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  const timeStamp = Date.now();
   if (httpMethod == "POST") {
-    const putParam: DocumentClient.PutItemInput = {
-      TableName: guildTableName,
-      Item: {
-        [guildTablepk]: `guild + ${timeStamp / 1000}`,
-        description: "compete with other guilds! play midnight",
-        guildStyle: "hardcore",
-        guildName: "cool guild",
-        members: ["player1", "player2"],
-      },
-    };
-    await db.put(putParam).promise();
-    const putParam2: DocumentClient.PutItemInput = {
-      TableName: guildTableName,
-      Item: {
-        [guildTablepk]: `guild22222 + ${timeStamp / 1000}`,
-        description: "let's have fun! play together and enjoy this game!",
-        guildStyle: "easygoing",
-        guildName: "chill guild",
-        members: ["player3", "player4"],
-      },
-    };
-    await db.put(putParam2).promise();
-    return {
-      statusCode: 200,
-      body: "Done",
-    };
+    return await putSampleData();
   }
-  const description = pathParameters!["description"];
+
   const query = {
     query: {
-      match: {
-        description: {
-          query: description,
-        },
-      },
+      match: {},
     },
   };
+
+  if (path.includes("description")) {
+    const description = pathParameters!["value"];
+    query.query.match = {
+      description: {
+        query: description,
+      },
+    };
+  }
+
+  if (path.includes("player")) {
+    const playerName = pathParameters!["value"];
+    query.query.match = {
+      members: {
+        query: playerName,
+      },
+    };
+  }
 
   const response = await osClient.search({
     index: process.env.OPEN_SEARCH_INDEX,
@@ -82,3 +73,78 @@ export const handler: APIGatewayProxyHandler = async ({
     body: JSON.stringify(response.body.hits),
   };
 };
+
+async function putSampleData() {
+  const playerBatchWriteInput: DocumentClient.BatchWriteItemInput = {
+    RequestItems: {
+      [playerTableName]: [
+        {
+          PutRequest: {
+            Item: {
+              [playerTablePk]: `p1`,
+              playerName: "Black Mage",
+            },
+          },
+        },
+        {
+          PutRequest: {
+            Item: {
+              [playerTablePk]: `p2`,
+              playerName: "White Mage",
+            },
+          },
+        },
+        {
+          PutRequest: {
+            Item: {
+              [playerTablePk]: `p3`,
+              playerName: "Blue Mage",
+            },
+          },
+        },
+        {
+          PutRequest: {
+            Item: {
+              [playerTablePk]: `p4`,
+              playerName: "Orange Mage",
+            },
+          },
+        },
+      ],
+    },
+  };
+  await db.batchWrite(playerBatchWriteInput).promise();
+  const guildBatchWriteInput: DocumentClient.BatchWriteItemInput = {
+    RequestItems: {
+      [guildTableName]: [
+        {
+          PutRequest: {
+            Item: {
+              [guildTablePk]: `guild1`,
+              description: "compete with other guilds! play midnight",
+              guildStyle: "hardcore",
+              guildName: "cool guild",
+              members: ["p1", "p2"],
+            },
+          },
+        },
+        {
+          PutRequest: {
+            Item: {
+              [guildTablePk]: `guild2`,
+              description: "let's have fun! play together and enjoy this game!",
+              guildStyle: "easygoing",
+              guildName: "chill guild",
+              members: ["p3", "p4"],
+            },
+          },
+        },
+      ],
+    },
+  };
+  await db.batchWrite(guildBatchWriteInput).promise();
+  return {
+    statusCode: 200,
+    body: "Done",
+  };
+}

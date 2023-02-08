@@ -11,4 +11,4 @@ export class Guild {
 }
 
 export const guildTableName = tableMap.get(Guild)!;
-export const guildTablepk = keyMap.get(Guild)!.get(Keys.PK)!;
+export const guildTablePk = keyMap.get(Guild)!.get(Keys.PK)!;
